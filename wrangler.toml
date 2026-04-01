@@ -6,8 +6,8 @@ compatibility_flags = ["nodejs_compat"]
 # ─── D1 Database ──────────────────────────────────────────────────────────────
 [[d1_databases]]
 binding = "DB"
-database_name = "webwaka-central-mgmt-db"
-database_id = "NEEDS_D1_UPGRADE"
+database_name = "webwaka-central-mgmt-db-prod"
+database_id = "847400fd-41b1-474e-b822-bd33cff433a9"
 migrations_dir = "migrations"
 
 # ─── KV Namespace ─────────────────────────────────────────────────────────────
@@ -18,8 +18,6 @@ id = "4dc91c49d36047f09f99084e0446b837"
 # ─── Production Environment ───────────────────────────────────────────────────
 [env.production]
 name = "webwaka-central-mgmt-production"
-route = { pattern = "central-mgmt.webwaka.app/*", zone_name = "webwaka.app" }
-
 [env.production.vars]
 ENVIRONMENT = "production"
 
@@ -30,24 +28,9 @@ ENVIRONMENT = "production"
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "webwaka-central-mgmt-db-prod"
-database_id = "NEEDS_D1_UPGRADE"
+database_id = "847400fd-41b1-474e-b822-bd33cff433a9"
 
 [[env.production.kv_namespaces]]
 binding = "PLATFORM_KV"
 id = "4dc91c49d36047f09f99084e0446b837"
 
-# ─── Staging Environment ──────────────────────────────────────────────────────
-[env.staging]
-name = "webwaka-central-mgmt-staging"
-
-[env.staging.vars]
-ENVIRONMENT = "staging"
-
-[[env.staging.d1_databases]]
-binding = "DB"
-database_name = "webwaka-central-mgmt-db-staging"
-database_id = "NEEDS_D1_UPGRADE"
-
-[[env.staging.kv_namespaces]]
-binding = "PLATFORM_KV"
-id = "e2d8d2942dce4124a21f5057f7804fb8"
