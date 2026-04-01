@@ -1,0 +1,53 @@
+name = "webwaka-central-mgmt"
+main = "src/worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# ─── D1 Database ──────────────────────────────────────────────────────────────
+[[d1_databases]]
+binding = "DB"
+database_name = "webwaka-central-mgmt-db"
+database_id = "PLACEHOLDER_CENTRAL_MGMT_D1_ID"
+migrations_dir = "migrations"
+
+# ─── KV Namespace ─────────────────────────────────────────────────────────────
+[[kv_namespaces]]
+binding = "PLATFORM_KV"
+id = "PLACEHOLDER_CENTRAL_MGMT_KV_ID"
+
+# ─── Production Environment ───────────────────────────────────────────────────
+[env.production]
+name = "webwaka-central-mgmt-production"
+route = { pattern = "central-mgmt.webwaka.app/*", zone_name = "webwaka.app" }
+
+[env.production.vars]
+ENVIRONMENT = "production"
+
+# Secrets (set via: wrangler secret put <KEY> --env production)
+# JWT_SECRET
+# INTER_SERVICE_SECRET
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "webwaka-central-mgmt-db-prod"
+database_id = "PLACEHOLDER_CENTRAL_MGMT_D1_PROD_ID"
+
+[[env.production.kv_namespaces]]
+binding = "PLATFORM_KV"
+id = "PLACEHOLDER_CENTRAL_MGMT_KV_PROD_ID"
+
+# ─── Staging Environment ──────────────────────────────────────────────────────
+[env.staging]
+name = "webwaka-central-mgmt-staging"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "webwaka-central-mgmt-db-staging"
+database_id = "PLACEHOLDER_CENTRAL_MGMT_D1_STAGING_ID"
+
+[[env.staging.kv_namespaces]]
+binding = "PLATFORM_KV"
+id = "PLACEHOLDER_CENTRAL_MGMT_KV_STAGING_ID"
