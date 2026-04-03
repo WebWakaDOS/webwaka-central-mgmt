@@ -2,7 +2,7 @@
  * WebWaka Central Management — Cloudflare Worker Entry Point
  *
  * Exposes the Ledger, Affiliate, and Super Admin modules as HTTP endpoints.
- * Receives inbound events from transport and commerce via POST /events/ingest.
+ * Receives inbound events from transport, commerce, and AI platform via POST /events/ingest.
  *
  * Blueprint Reference: Part 10.1 (Central Management & Economics)
  * Blueprint Reference: Part 9.1 (Cloudflare-First: D1, KV, Workers)
@@ -12,6 +12,7 @@
  */
 import { Hono } from 'hono';
 import { jwtAuthMiddleware, requireRole } from '@webwaka/core';
+import { processAIUsageEvent } from './modules/ai-billing/core';
 
 export interface Env {
   DB: D1Database;
@@ -158,7 +159,7 @@ app.post('/events/ingest', async (c) => {
           now,
         ).run();
       }
-    } else if (event_type === 'commerce.payout.processed') {
+     } else if (event_type === 'commerce.payout.processed') {
       const amountKobo = payload.amount_kobo as number;
       const payoutId = payload.payout_id as string;
       if (Number.isInteger(amountKobo) && amountKobo > 0) {
@@ -175,8 +176,26 @@ app.post('/events/ingest', async (c) => {
           now,
         ).run();
       }
+    } else if (event_type === 'ai.usage.recorded') {
+      // CEN-1: AI Usage Billing — process usage event from webwaka-ai-platform
+      const aiPayload = payload as {
+        capabilityId: string;
+        model: string;
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        usedByok: boolean;
+        estimatedCostUsd?: number;
+      };
+      if (aiPayload.capabilityId && aiPayload.totalTokens > 0) {
+        await processAIUsageEvent(
+          { DB: c.env.DB, PLATFORM_KV: c.env.PLATFORM_KV },
+          tenant_id ?? 'unknown',
+          aiPayload,
+          eventId,
+        );
+      }
     }
-
     // Mark event as processed
     await c.env.DB.prepare(
       `UPDATE central_mgmt_events SET processed = 1, processed_at = ? WHERE id = ?`
