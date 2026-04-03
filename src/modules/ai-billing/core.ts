@@ -47,6 +47,10 @@ export interface AIUsagePayload {
 export interface AIUsageBillingEnv {
   DB: D1Database;
   PLATFORM_KV: KVNamespace;
+  /** KV namespace for outbound event queue (write-only from emitter side) */
+  EVENTS?: KVNamespace;
+  /** Optional HTTP endpoint to forward events to a central event router */
+  EVENT_BUS_URL?: string;
 }
 
 /**
@@ -117,9 +121,12 @@ export async function processAIUsageEvent(
     ).bind(newConsumed, now, tenantId).run();
 
     // ─── 3. Emit billing.debit.recorded for metered tenants ─────────────────
+    // Only emit if: tenant is NOT using BYOK (platform bears the cost) AND
+    // there is an estimated cost to bill.
     if (!payload.usedByok && payload.estimatedCostUsd && payload.estimatedCostUsd > 0) {
       const costKobo = Math.round(payload.estimatedCostUsd * 1650 * 100); // USD → NGN → kobo
       if (costKobo > 0) {
+        // Write to ledger_entries for financial record-keeping
         await env.DB.prepare(
           `INSERT OR IGNORE INTO ledger_entries
              (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
@@ -139,11 +146,66 @@ export async function processAIUsageEvent(
           }),
           now,
         ).run();
+
+        // Emit billing.debit.recorded event to the platform event bus
+        // This allows other services (e.g. notifications, analytics) to react
+        await emitBillingEvent(env, tenantId, {
+          event: 'billing.debit.recorded',
+          tenantId,
+          payload: {
+            source: 'ai-platform',
+            eventId,
+            capabilityId: payload.capabilityId,
+            model: payload.model,
+            totalTokens: payload.totalTokens,
+            amountKobo: costKobo,
+            currency: 'NGN',
+            estimatedCostUsd: payload.estimatedCostUsd,
+          },
+          timestamp: now,
+        });
       }
     }
   }
 
   return { recorded: true, quotaExceeded };
+}
+
+/**
+ * Emit a billing event to the platform event bus.
+ * Uses KV outbox pattern (write to EVENTS KV, optionally forward via HTTP).
+ * Non-fatal — failures are logged and swallowed.
+ */
+async function emitBillingEvent(
+  env: AIUsageBillingEnv,
+  tenantId: string,
+  event: { event: string; tenantId: string; payload: unknown; timestamp: number },
+): Promise<void> {
+  const key = `event:${Date.now()}:${crypto.randomUUID()}`;
+  const body = JSON.stringify(event);
+
+  // 1. Write to EVENTS KV outbox
+  if (env.EVENTS) {
+    try {
+      await env.EVENTS.put(key, body, { expirationTtl: 86400 });
+    } catch (err) {
+      console.warn(`[ai-billing] Failed to write billing event to KV: ${err}`);
+    }
+  }
+
+  // 2. HTTP delivery (fire-and-forget)
+  if (env.EVENT_BUS_URL) {
+    try {
+      await fetch(env.EVENT_BUS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch (err) {
+      console.warn(`[ai-billing] Failed to forward billing event via HTTP: ${err}`);
+    }
+  }
 }
 
 /**
