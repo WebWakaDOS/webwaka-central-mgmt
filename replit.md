@@ -76,6 +76,25 @@ wrangler.toml                      # Cloudflare Workers configuration
 6. **Webhook DLQ** — `webhook_dlq` table; exponential backoff (30s, 1m, 2m, 4m, 8m); max 5 attempts → exhausted
 7. **Data Retention Pruner** — Deletes processed events, fraud scores, delivered DLQ entries, expired idempotency keys older than 90 days; ledger tables never touched
 
+## Test Coverage
+78 unit tests across 8 test files — 100% pass rate.
+
+| Test File | Tests | Coverage |
+|---|---|---|
+| `billing/tax.test.ts` | 24 | calculateTaxes, convertToNGNKobo, isSupportedCurrency |
+| `fraud/core.test.ts` | 11 | All 5 fraud rules, score capping, risk levels, D1 persistence |
+| `webhooks/dlq.test.ts` | 11 | enqueueDLQ, retryDueDLQItems, listDLQEntries |
+| `retention/pruner.test.ts` | 6 | pruneOldData, ledger immutability guard |
+| `super-admin/suspension.test.ts` | 16 | suspend, unsuspend, isTenantSuspended, round-trip, audit log |
+| `ledger/core.test.ts` | 3 | LedgerService (regression) |
+| `affiliate/core.test.ts` | 3 | AffiliateSystem (regression) |
+| `super-admin/core.test.ts` | 4 | SuperAdminService (regression) |
+
+```bash
+npm run test   # 78/78 pass
+npm run build  # 0 TypeScript errors
+```
+
 ## Local Development
 ```bash
 # Apply D1 migrations locally
