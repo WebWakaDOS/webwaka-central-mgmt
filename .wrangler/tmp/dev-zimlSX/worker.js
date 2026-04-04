@@ -6,7 +6,7 @@ var __publicField = (obj, key, value) => {
   return value;
 };
 
-// .wrangler/tmp/bundle-p4doiX/strip-cf-connecting-ip-header.js
+// .wrangler/tmp/bundle-Oa6LTS/strip-cf-connecting-ip-header.js
 function stripCfConnectingIPHeader(input, init) {
   const request = new Request(input, init);
   request.headers.delete("CF-Connecting-IP");
@@ -3291,8 +3291,326 @@ async function emitBillingEvent(env2, tenantId, event) {
 }
 __name(emitBillingEvent, "emitBillingEvent");
 
+// src/modules/billing/tax.ts
+var VAT_RATE = 0.075;
+var WHT_RATE = 0.05;
+var SUPPORTED_CURRENCIES = ["NGN", "GHS", "KES"];
+var DEFAULT_FX_TO_NGN = {
+  NGN: 1,
+  GHS: 90,
+  KES: 5.5
+};
+function calculateTaxes(grossKobo, currency = "NGN") {
+  if (!Number.isInteger(grossKobo) || grossKobo <= 0) {
+    throw new Error("grossKobo must be a positive integer");
+  }
+  const vatKobo = Math.round(grossKobo * VAT_RATE);
+  const whtKobo = Math.round(grossKobo * WHT_RATE);
+  const netKobo = grossKobo - vatKobo - whtKobo;
+  return { grossKobo, vatKobo, whtKobo, netKobo, currency };
+}
+__name(calculateTaxes, "calculateTaxes");
+async function convertToNGNKobo(amountSmallestUnit, fromCurrency, db) {
+  if (fromCurrency === "NGN")
+    return amountSmallestUnit;
+  const row = await db.prepare("SELECT rate_to_ngn FROM fx_rates WHERE currency = ?").bind(fromCurrency).first();
+  const rate = row?.rate_to_ngn ?? DEFAULT_FX_TO_NGN[fromCurrency] ?? 1;
+  return Math.round(amountSmallestUnit * rate);
+}
+__name(convertToNGNKobo, "convertToNGNKobo");
+function isSupportedCurrency(c) {
+  return SUPPORTED_CURRENCIES.includes(c);
+}
+__name(isSupportedCurrency, "isSupportedCurrency");
+
+// src/modules/fraud/core.ts
+var HIGH_AMOUNT_THRESHOLD_KOBO = 5e7;
+var CRITICAL_AMOUNT_THRESHOLD_KOBO = 2e8;
+var ROUND_AMOUNT_MIN_KOBO = 1e7;
+var VELOCITY_WINDOW_MS = 6e4;
+var VELOCITY_MAX_EVENTS = 10;
+async function ruleVelocity(db, tenantId, eventType) {
+  const windowStart = Date.now() - VELOCITY_WINDOW_MS;
+  const result = await db.prepare(
+    `SELECT COUNT(*) as cnt FROM central_mgmt_events
+       WHERE tenant_id = ? AND event_type = ? AND received_at >= ?`
+  ).bind(tenantId, eventType, windowStart).first();
+  const cnt = result?.cnt ?? 0;
+  if (cnt >= VELOCITY_MAX_EVENTS) {
+    return {
+      rule: "velocity_limit",
+      score: 40,
+      detail: `${cnt} '${eventType}' events from tenant in last 60 s (limit: ${VELOCITY_MAX_EVENTS})`
+    };
+  }
+  return null;
+}
+__name(ruleVelocity, "ruleVelocity");
+async function scoreFraudEvent(db, context2) {
+  const signals = [];
+  if (context2.amountKobo != null) {
+    if (context2.amountKobo >= CRITICAL_AMOUNT_THRESHOLD_KOBO) {
+      signals.push({
+        rule: "critical_amount",
+        score: 50,
+        detail: `Amount ${context2.amountKobo} kobo (\u20A6${(context2.amountKobo / 100).toLocaleString()}) exceeds critical threshold`
+      });
+    } else if (context2.amountKobo >= HIGH_AMOUNT_THRESHOLD_KOBO) {
+      signals.push({
+        rule: "high_amount",
+        score: 25,
+        detail: `Amount ${context2.amountKobo} kobo (\u20A6${(context2.amountKobo / 100).toLocaleString()}) exceeds high-value threshold`
+      });
+    }
+    if (context2.amountKobo >= ROUND_AMOUNT_MIN_KOBO && context2.amountKobo % 1e6 === 0) {
+      signals.push({
+        rule: "round_amount",
+        score: 15,
+        detail: `Amount ${context2.amountKobo} kobo is suspiciously round`
+      });
+    }
+  }
+  if (context2.tenantId) {
+    const velocitySignal = await ruleVelocity(db, context2.tenantId, context2.eventType);
+    if (velocitySignal)
+      signals.push(velocitySignal);
+  }
+  if (!context2.tenantId && context2.amountKobo != null && context2.amountKobo > 1e6) {
+    signals.push({
+      rule: "anonymous_high_value",
+      score: 30,
+      detail: "High-value event received with no tenant_id"
+    });
+  }
+  const totalScore = Math.min(
+    signals.reduce((sum, s) => sum + s.score, 0),
+    100
+  );
+  const riskLevel = totalScore >= 70 ? "critical" : totalScore >= 40 ? "high" : totalScore >= 20 ? "medium" : "low";
+  const action = totalScore >= 70 ? "block" : totalScore >= 40 ? "flag" : "allow";
+  const scoreId = `frd_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+  await db.prepare(
+    `INSERT INTO fraud_scores
+         (id, event_id, event_type, tenant_id, score, risk_level, signals_json, action, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    scoreId,
+    context2.eventId,
+    context2.eventType,
+    context2.tenantId ?? null,
+    totalScore,
+    riskLevel,
+    JSON.stringify(signals),
+    action,
+    Date.now()
+  ).run();
+  return { score: totalScore, riskLevel, signals, action };
+}
+__name(scoreFraudEvent, "scoreFraudEvent");
+
+// src/modules/webhooks/dlq.ts
+var MAX_ATTEMPTS = 5;
+var BASE_DELAY_MS = 3e4;
+function retryDelayMs(attemptsDone) {
+  return BASE_DELAY_MS * Math.pow(2, attemptsDone - 1);
+}
+__name(retryDelayMs, "retryDelayMs");
+async function retryDueDLQItems(db) {
+  const now = Date.now();
+  const { results } = await db.prepare(
+    `SELECT * FROM webhook_dlq
+       WHERE status IN ('pending', 'retrying') AND next_retry_at <= ?
+       ORDER BY next_retry_at ASC
+       LIMIT 50`
+  ).bind(now).all();
+  let delivered = 0;
+  let exhausted = 0;
+  let rescheduled = 0;
+  for (const item of results) {
+    const newAttempts = item.attempts + 1;
+    try {
+      const resp = await fetch(item.target_url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: item.payload_json,
+        signal: AbortSignal.timeout(1e4)
+      });
+      if (resp.ok) {
+        await db.prepare(
+          `UPDATE webhook_dlq
+             SET status = 'delivered', delivered_at = ?, attempts = ?
+             WHERE id = ?`
+        ).bind(now, newAttempts, item.id).run();
+        delivered++;
+      } else {
+        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (newAttempts >= MAX_ATTEMPTS) {
+        await db.prepare(
+          `UPDATE webhook_dlq
+             SET status = 'exhausted', attempts = ?, last_error = ?, next_retry_at = NULL
+             WHERE id = ?`
+        ).bind(newAttempts, errMsg, item.id).run();
+        exhausted++;
+      } else {
+        const nextRetry = now + retryDelayMs(newAttempts);
+        await db.prepare(
+          `UPDATE webhook_dlq
+             SET status = 'retrying', attempts = ?, last_error = ?, next_retry_at = ?
+             WHERE id = ?`
+        ).bind(newAttempts, errMsg, nextRetry, item.id).run();
+        rescheduled++;
+      }
+    }
+  }
+  return { processed: results.length, delivered, exhausted, rescheduled };
+}
+__name(retryDueDLQItems, "retryDueDLQItems");
+async function listDLQEntries(db, status, limit = 50, offset = 0) {
+  if (status) {
+    const { results: results2 } = await db.prepare(
+      `SELECT * FROM webhook_dlq WHERE status = ?
+         ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    ).bind(status, limit, offset).all();
+    return results2;
+  }
+  const { results } = await db.prepare(
+    `SELECT * FROM webhook_dlq ORDER BY created_at DESC LIMIT ? OFFSET ?`
+  ).bind(limit, offset).all();
+  return results;
+}
+__name(listDLQEntries, "listDLQEntries");
+
+// src/modules/retention/pruner.ts
+var RETENTION_DAYS = 90;
+var RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1e3;
+async function pruneOldData(db) {
+  const cutoffMs = Date.now() - RETENTION_MS;
+  const now = Date.now();
+  const [eventsResult, fraudResult, dlqResult, idemResult] = await Promise.all([
+    // Processed events older than 90 days
+    db.prepare(
+      `DELETE FROM central_mgmt_events
+         WHERE processed = 1 AND received_at < ?`
+    ).bind(cutoffMs).run(),
+    // Fraud scores older than 90 days
+    db.prepare(`DELETE FROM fraud_scores WHERE created_at < ?`).bind(cutoffMs).run(),
+    // Delivered or exhausted DLQ entries older than 90 days
+    db.prepare(
+      `DELETE FROM webhook_dlq
+         WHERE status IN ('delivered', 'exhausted') AND created_at < ?`
+    ).bind(cutoffMs).run(),
+    // Expired idempotency keys (use their own expires_at timestamp)
+    db.prepare(`DELETE FROM idempotency_keys WHERE expires_at < ?`).bind(now).run()
+  ]);
+  const prunedEvents = eventsResult.meta.changes;
+  const prunedFraudScores = fraudResult.meta.changes;
+  const prunedDLQEntries = dlqResult.meta.changes;
+  const prunedIdempotencyKeys = idemResult.meta.changes;
+  return {
+    cutoffMs,
+    prunedEvents,
+    prunedFraudScores,
+    prunedDLQEntries,
+    prunedIdempotencyKeys,
+    totalPruned: prunedEvents + prunedFraudScores + prunedDLQEntries + prunedIdempotencyKeys
+  };
+}
+__name(pruneOldData, "pruneOldData");
+
+// src/modules/super-admin/suspension.ts
+async function suspendTenant(kv, db, tenantId, reason, suspendedBy = "system") {
+  const raw2 = await kv.get(`tenant:${tenantId}`);
+  if (raw2) {
+    const config2 = JSON.parse(raw2);
+    config2.status = "suspended";
+    config2.suspendedAt = Date.now();
+    config2.suspensionReason = reason;
+    await kv.put(`tenant:${tenantId}`, JSON.stringify(config2));
+  } else {
+    await kv.put(
+      `tenant:${tenantId}`,
+      JSON.stringify({
+        tenantId,
+        status: "suspended",
+        suspendedAt: Date.now(),
+        suspensionReason: reason,
+        enabledModules: [],
+        featureFlags: {}
+      })
+    );
+  }
+  const logId = `susp_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+  await db.prepare(
+    `INSERT INTO tenant_suspension_log
+         (id, tenant_id, action, reason, suspended_by, created_at)
+       VALUES (?, ?, 'suspend', ?, ?, ?)`
+  ).bind(logId, tenantId, reason, suspendedBy, Date.now()).run();
+  return { tenantId, action: "suspend", reason, logId };
+}
+__name(suspendTenant, "suspendTenant");
+async function unsuspendTenant(kv, db, tenantId, reason, unsuspendedBy = "system") {
+  const raw2 = await kv.get(`tenant:${tenantId}`);
+  if (raw2) {
+    const config2 = JSON.parse(raw2);
+    config2.status = "active";
+    delete config2.suspendedAt;
+    delete config2.suspensionReason;
+    await kv.put(`tenant:${tenantId}`, JSON.stringify(config2));
+  }
+  const logId = `unsusp_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+  await db.prepare(
+    `INSERT INTO tenant_suspension_log
+         (id, tenant_id, action, reason, suspended_by, created_at)
+       VALUES (?, ?, 'unsuspend', ?, ?, ?)`
+  ).bind(logId, tenantId, reason, unsuspendedBy, Date.now()).run();
+  return { tenantId, action: "unsuspend", reason, logId };
+}
+__name(unsuspendTenant, "unsuspendTenant");
+async function isTenantSuspended(kv, tenantId) {
+  const raw2 = await kv.get(`tenant:${tenantId}`);
+  if (!raw2)
+    return false;
+  try {
+    const config2 = JSON.parse(raw2);
+    return config2.status === "suspended";
+  } catch {
+    return false;
+  }
+}
+__name(isTenantSuspended, "isTenantSuspended");
+async function getTenantSuspensionLog(db, tenantId, limit = 50) {
+  const { results } = await db.prepare(
+    `SELECT id, action, reason, suspended_by, created_at
+       FROM tenant_suspension_log
+       WHERE tenant_id = ?
+       ORDER BY created_at DESC
+       LIMIT ?`
+  ).bind(tenantId, limit).all();
+  return results;
+}
+__name(getTenantSuspensionLog, "getTenantSuspensionLog");
+
 // src/worker.ts
 var app = new Hono2();
+var IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1e3;
+async function checkIdempotency(db, aggregateId) {
+  const row = await db.prepare("SELECT event_id FROM idempotency_keys WHERE event_id = ? AND expires_at > ?").bind(aggregateId, Date.now()).first();
+  return row !== null;
+}
+__name(checkIdempotency, "checkIdempotency");
+async function registerIdempotencyKey(db, aggregateId, eventType, tenantId) {
+  const now = Date.now();
+  const expiresAt = now + IDEMPOTENCY_WINDOW_MS;
+  await db.prepare(
+    `INSERT OR IGNORE INTO idempotency_keys
+         (event_id, event_type, tenant_id, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`
+  ).bind(aggregateId, eventType, tenantId ?? null, now, expiresAt).run();
+}
+__name(registerIdempotencyKey, "registerIdempotencyKey");
 app.get(
   "/health",
   (c) => c.json({
@@ -3301,6 +3619,7 @@ app.get(
       service: "webwaka-central-mgmt",
       status: "healthy",
       modules: ["ledger", "affiliate", "super-admin"],
+      enhancements: ["idempotency", "tax-splitting", "multi-currency", "fraud-scoring", "tenant-suspension", "webhook-dlq", "data-retention"],
       environment: c.env.ENVIRONMENT ?? "development",
       timestamp: Date.now()
     }
@@ -3320,15 +3639,64 @@ app.post("/events/ingest", async (c) => {
   }
   const { event_type, aggregate_id, tenant_id, payload, timestamp } = body;
   if (!event_type || !aggregate_id) {
-    return c.json({ success: false, error: "Missing required fields: event_type, aggregate_id" }, 400);
+    return c.json(
+      { success: false, error: "Missing required fields: event_type, aggregate_id" },
+      400
+    );
   }
+  const isDuplicate = await checkIdempotency(c.env.DB, aggregate_id);
+  if (isDuplicate) {
+    return c.json({
+      success: true,
+      message: "Already processed (idempotency key)",
+      aggregate_id
+    });
+  }
+  if (tenant_id) {
+    const suspended = await isTenantSuspended(c.env.PLATFORM_KV, tenant_id);
+    if (suspended) {
+      return c.json(
+        { success: false, error: `Tenant ${tenant_id} is suspended. Event rejected.` },
+        403
+      );
+    }
+  }
+  const rawCurrency = payload.currency ?? "NGN";
+  const currency = isSupportedCurrency(rawCurrency) ? rawCurrency : "NGN";
   const now = Date.now();
   const eventId = `cme_${now}_${Math.random().toString(36).slice(2, 9)}`;
-  const existing = await c.env.DB.prepare(
+  const financialEventTypes = /* @__PURE__ */ new Set([
+    "transport.booking.confirmed",
+    "transport.booking.refunded",
+    "commerce.order.paid",
+    "commerce.payout.processed"
+  ]);
+  if (financialEventTypes.has(event_type)) {
+    const rawAmount = payload.total_amount ?? payload.amount_kobo ?? payload.refund_amount_kobo ?? void 0;
+    const amountNGNKobo = rawAmount != null && currency !== "NGN" ? await convertToNGNKobo(rawAmount, currency, c.env.DB) : rawAmount;
+    const fraud = await scoreFraudEvent(c.env.DB, {
+      eventId: aggregate_id,
+      eventType: event_type,
+      tenantId: tenant_id,
+      amountKobo: amountNGNKobo,
+      payload
+    });
+    if (fraud.action === "block") {
+      return c.json(
+        {
+          success: false,
+          error: "Event blocked by fraud scoring engine",
+          fraud: { score: fraud.score, riskLevel: fraud.riskLevel, signals: fraud.signals }
+        },
+        422
+      );
+    }
+  }
+  const existingEvent = await c.env.DB.prepare(
     `SELECT id FROM central_mgmt_events WHERE source_event_id = ?`
   ).bind(aggregate_id).first();
-  if (existing) {
-    return c.json({ success: true, message: "Already processed", event_id: existing.id });
+  if (existingEvent) {
+    return c.json({ success: true, message: "Already processed", event_id: existingEvent.id });
   }
   await c.env.DB.prepare(
     `INSERT INTO central_mgmt_events
@@ -3340,8 +3708,9 @@ app.post("/events/ingest", async (c) => {
       const amountKobo = payload.total_amount;
       const bookingId = payload.booking_id;
       if (Number.isInteger(amountKobo) && amountKobo > 0) {
-        const platformFeeKobo = Math.round(amountKobo * 0.05);
-        const operatorKobo = amountKobo - platformFeeKobo;
+        const amountNGN = await convertToNGNKobo(amountKobo, currency, c.env.DB);
+        const platformFeeKobo = Math.round(amountNGN * 0.05);
+        const operatorKobo = amountNGN - platformFeeKobo;
         const txnId = `txn_trn_${bookingId}`;
         await c.env.DB.batch([
           c.env.DB.prepare(
@@ -3352,7 +3721,7 @@ app.post("/events/ingest", async (c) => {
             `led_plat_${bookingId}`,
             txnId,
             platformFeeKobo,
-            JSON.stringify({ source: "transport", booking_id: bookingId, tenant_id }),
+            JSON.stringify({ source: "transport", booking_id: bookingId, tenant_id, original_currency: currency }),
             now
           ),
           c.env.DB.prepare(
@@ -3364,7 +3733,7 @@ app.post("/events/ingest", async (c) => {
             txnId,
             `operator_${tenant_id ?? "unknown"}`,
             operatorKobo,
-            JSON.stringify({ source: "transport", booking_id: bookingId, tenant_id }),
+            JSON.stringify({ source: "transport", booking_id: bookingId, tenant_id, original_currency: currency }),
             now
           )
         ]);
@@ -3373,6 +3742,7 @@ app.post("/events/ingest", async (c) => {
       const amountKobo = payload.refund_amount_kobo;
       const bookingId = payload.booking_id;
       if (Number.isInteger(amountKobo) && amountKobo > 0) {
+        const amountNGN = await convertToNGNKobo(amountKobo, currency, c.env.DB);
         await c.env.DB.prepare(
           `INSERT OR IGNORE INTO ledger_entries
              (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
@@ -3380,8 +3750,8 @@ app.post("/events/ingest", async (c) => {
         ).bind(
           `led_ref_${bookingId}`,
           `txn_ref_${bookingId}`,
-          amountKobo,
-          JSON.stringify({ source: "transport", booking_id: bookingId, refund: true }),
+          amountNGN,
+          JSON.stringify({ source: "transport", booking_id: bookingId, refund: true, original_currency: currency }),
           now
         ).run();
       }
@@ -3390,7 +3760,8 @@ app.post("/events/ingest", async (c) => {
       const orderId = payload.order_id;
       const commissionBps = payload.commission_bps ?? 500;
       if (Number.isInteger(amountKobo) && amountKobo > 0) {
-        const commissionKobo = Math.round(amountKobo * commissionBps / 1e4);
+        const amountNGN = await convertToNGNKobo(amountKobo, currency, c.env.DB);
+        const commissionKobo = Math.round(amountNGN * commissionBps / 1e4);
         await c.env.DB.prepare(
           `INSERT OR IGNORE INTO ledger_entries
              (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
@@ -3399,26 +3770,69 @@ app.post("/events/ingest", async (c) => {
           `led_com_${orderId}`,
           `txn_com_${orderId}`,
           commissionKobo,
-          JSON.stringify({ source: "commerce", order_id: orderId, tenant_id, commission_bps: commissionBps }),
+          JSON.stringify({ source: "commerce", order_id: orderId, tenant_id, commission_bps: commissionBps, original_currency: currency }),
           now
         ).run();
       }
     } else if (event_type === "commerce.payout.processed") {
       const amountKobo = payload.amount_kobo;
       const payoutId = payload.payout_id;
+      const vendorId = payload.vendor_id ?? "unknown";
       if (Number.isInteger(amountKobo) && amountKobo > 0) {
-        await c.env.DB.prepare(
-          `INSERT OR IGNORE INTO ledger_entries
-             (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
-           VALUES (?, ?, ?, 'vendor', 'debit', ?, 'NGN', 'cleared', ?, ?)`
-        ).bind(
-          `led_pay_${payoutId}`,
-          `txn_pay_${payoutId}`,
-          `vendor_${payload.vendor_id ?? "unknown"}`,
-          amountKobo,
-          JSON.stringify({ source: "commerce", payout_id: payoutId, vendor_id: payload.vendor_id }),
-          now
-        ).run();
+        const amountNGN = await convertToNGNKobo(amountKobo, currency, c.env.DB);
+        const taxes = calculateTaxes(amountNGN, "NGN");
+        const txnId = `txn_pay_${payoutId}`;
+        const meta = JSON.stringify({
+          source: "commerce",
+          payout_id: payoutId,
+          vendor_id: vendorId,
+          tax_breakdown: {
+            gross_kobo: taxes.grossKobo,
+            vat_kobo: taxes.vatKobo,
+            wht_kobo: taxes.whtKobo,
+            net_kobo: taxes.netKobo
+          },
+          original_currency: currency
+        });
+        await c.env.DB.batch([
+          // Net payout to vendor (gross − VAT − WHT)
+          c.env.DB.prepare(
+            `INSERT OR IGNORE INTO ledger_entries
+               (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
+             VALUES (?, ?, ?, 'vendor', 'debit', ?, 'NGN', 'cleared', ?, ?)`
+          ).bind(
+            `led_pay_net_${payoutId}`,
+            txnId,
+            `vendor_${vendorId}`,
+            taxes.netKobo,
+            meta,
+            now
+          ),
+          // VAT → platform tax collection account
+          c.env.DB.prepare(
+            `INSERT OR IGNORE INTO ledger_entries
+               (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
+             VALUES (?, ?, 'platform_vat', 'platform', 'credit', ?, 'NGN', 'cleared', ?, ?)`
+          ).bind(
+            `led_pay_vat_${payoutId}`,
+            txnId,
+            taxes.vatKobo,
+            meta,
+            now
+          ),
+          // WHT → platform withholding tax account
+          c.env.DB.prepare(
+            `INSERT OR IGNORE INTO ledger_entries
+               (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
+             VALUES (?, ?, 'platform_wht', 'platform', 'credit', ?, 'NGN', 'cleared', ?, ?)`
+          ).bind(
+            `led_pay_wht_${payoutId}`,
+            txnId,
+            taxes.whtKobo,
+            meta,
+            now
+          )
+        ]);
       }
     } else if (event_type === "ai.usage.recorded") {
       const aiPayload = payload;
@@ -3434,6 +3848,7 @@ app.post("/events/ingest", async (c) => {
     await c.env.DB.prepare(
       `UPDATE central_mgmt_events SET processed = 1, processed_at = ? WHERE id = ?`
     ).bind(now, eventId).run();
+    await registerIdempotencyKey(c.env.DB, aggregate_id, event_type, tenant_id);
     return c.json({ success: true, data: { event_id: eventId, event_type } });
   } catch (err) {
     console.error("[central-mgmt] Ledger processing error:", err);
@@ -3446,6 +3861,7 @@ app.get("/api/ledger/entries", requireRole(["admin", "super_admin"]), async (c) 
   const offset = parseInt(c.req.query("offset") ?? "0");
   const accountId = c.req.query("account_id");
   const eventType = c.req.query("event_type");
+  const currency = c.req.query("currency");
   let query = `SELECT * FROM ledger_entries`;
   const params = [];
   const conditions = [];
@@ -3457,6 +3873,10 @@ app.get("/api/ledger/entries", requireRole(["admin", "super_admin"]), async (c) 
     conditions.push("account_type = ?");
     params.push(eventType);
   }
+  if (currency) {
+    conditions.push("currency = ?");
+    params.push(currency);
+  }
   if (conditions.length)
     query += ` WHERE ${conditions.join(" AND ")}`;
   query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
@@ -3465,16 +3885,21 @@ app.get("/api/ledger/entries", requireRole(["admin", "super_admin"]), async (c) 
   return c.json({ success: true, data: entries.results });
 });
 app.get("/api/ledger/summary", requireRole(["admin", "super_admin"]), async (c) => {
-  const summary = await c.env.DB.prepare(
-    `SELECT account_id, account_type,
-       SUM(CASE WHEN type = 'credit' THEN amount_kobo ELSE 0 END) as total_credits_kobo,
-       SUM(CASE WHEN type = 'debit' THEN amount_kobo ELSE 0 END) as total_debits_kobo,
-       SUM(CASE WHEN type = 'credit' THEN amount_kobo ELSE -amount_kobo END) as balance_kobo
-     FROM ledger_entries
-     WHERE status = 'cleared'
-     GROUP BY account_id, account_type
-     ORDER BY account_type, account_id`
-  ).all();
+  const currency = c.req.query("currency");
+  let query = `
+    SELECT account_id, account_type, currency,
+      SUM(CASE WHEN type = 'credit' THEN amount_kobo ELSE 0 END) as total_credits_kobo,
+      SUM(CASE WHEN type = 'debit'  THEN amount_kobo ELSE 0 END) as total_debits_kobo,
+      SUM(CASE WHEN type = 'credit' THEN amount_kobo ELSE -amount_kobo END) as balance_kobo
+    FROM ledger_entries
+    WHERE status = 'cleared'`;
+  const params = [];
+  if (currency) {
+    query += ` AND currency = ?`;
+    params.push(currency);
+  }
+  query += ` GROUP BY account_id, account_type, currency ORDER BY account_type, account_id`;
+  const summary = await c.env.DB.prepare(query).bind(...params).all();
   return c.json({ success: true, data: summary.results });
 });
 app.get("/api/events", requireRole(["admin", "super_admin"]), async (c) => {
@@ -3486,6 +3911,115 @@ app.get("/api/events", requireRole(["admin", "super_admin"]), async (c) => {
      ORDER BY received_at DESC LIMIT ? OFFSET ?`
   ).bind(limit, offset).all();
   return c.json({ success: true, data: events.results });
+});
+app.get("/api/fraud/scores", requireRole(["admin", "super_admin"]), async (c) => {
+  const limit = Math.min(parseInt(c.req.query("limit") ?? "50"), 200);
+  const offset = parseInt(c.req.query("offset") ?? "0");
+  const riskLevel = c.req.query("risk_level");
+  const tenantId = c.req.query("tenant_id");
+  let query = `SELECT * FROM fraud_scores`;
+  const params = [];
+  const conditions = [];
+  if (riskLevel) {
+    conditions.push("risk_level = ?");
+    params.push(riskLevel);
+  }
+  if (tenantId) {
+    conditions.push("tenant_id = ?");
+    params.push(tenantId);
+  }
+  if (conditions.length)
+    query += ` WHERE ${conditions.join(" AND ")}`;
+  query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+  const scores = await c.env.DB.prepare(query).bind(...params).all();
+  return c.json({ success: true, data: scores.results });
+});
+app.get("/api/admin/dlq", requireRole(["admin", "super_admin"]), async (c) => {
+  const limit = Math.min(parseInt(c.req.query("limit") ?? "50"), 200);
+  const offset = parseInt(c.req.query("offset") ?? "0");
+  const status = c.req.query("status");
+  const entries = await listDLQEntries(c.env.DB, status, limit, offset);
+  return c.json({ success: true, data: entries });
+});
+app.post("/api/admin/dlq/retry", requireRole(["admin", "super_admin"]), async (c) => {
+  const result = await retryDueDLQItems(c.env.DB);
+  return c.json({ success: true, data: result });
+});
+app.post("/api/admin/retention/prune", requireRole(["super_admin"]), async (c) => {
+  const result = await pruneOldData(c.env.DB);
+  return c.json({ success: true, data: result });
+});
+app.put("/api/admin/tenants/:tenantId/suspend", requireRole(["super_admin"]), async (c) => {
+  const { tenantId } = c.req.param();
+  let reason = "Suspended by admin";
+  try {
+    const body = await c.req.json();
+    if (body.reason)
+      reason = body.reason;
+  } catch {
+  }
+  const result = await suspendTenant(
+    c.env.PLATFORM_KV,
+    c.env.DB,
+    tenantId,
+    reason,
+    "admin"
+  );
+  return c.json({ success: true, data: result });
+});
+app.put("/api/admin/tenants/:tenantId/unsuspend", requireRole(["super_admin"]), async (c) => {
+  const { tenantId } = c.req.param();
+  let reason = "Reinstated by admin";
+  try {
+    const body = await c.req.json();
+    if (body.reason)
+      reason = body.reason;
+  } catch {
+  }
+  const result = await unsuspendTenant(
+    c.env.PLATFORM_KV,
+    c.env.DB,
+    tenantId,
+    reason,
+    "admin"
+  );
+  return c.json({ success: true, data: result });
+});
+app.get("/api/admin/tenants/:tenantId/suspension-log", requireRole(["admin", "super_admin"]), async (c) => {
+  const { tenantId } = c.req.param();
+  const limit = Math.min(parseInt(c.req.query("limit") ?? "50"), 200);
+  const log3 = await getTenantSuspensionLog(c.env.DB, tenantId, limit);
+  return c.json({ success: true, data: log3 });
+});
+app.get("/api/admin/tenants/:tenantId/status", requireRole(["admin", "super_admin"]), async (c) => {
+  const { tenantId } = c.req.param();
+  const suspended = await isTenantSuspended(c.env.PLATFORM_KV, tenantId);
+  return c.json({ success: true, data: { tenantId, suspended } });
+});
+app.get("/api/admin/fx-rates", requireRole(["admin", "super_admin"]), async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT currency, rate_to_ngn, updated_at FROM fx_rates ORDER BY currency`
+  ).all();
+  return c.json({ success: true, data: results });
+});
+app.put("/api/admin/fx-rates/:currency", requireRole(["super_admin"]), async (c) => {
+  const currency = c.req.param("currency").toUpperCase();
+  let rate;
+  try {
+    const body = await c.req.json();
+    rate = Number(body.rate_to_ngn);
+    if (!Number.isFinite(rate) || rate <= 0)
+      throw new Error();
+  } catch {
+    return c.json({ success: false, error: "Body must be { rate_to_ngn: <positive number> }" }, 400);
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO fx_rates (id, currency, rate_to_ngn, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(currency) DO UPDATE SET rate_to_ngn = excluded.rate_to_ngn, updated_at = excluded.updated_at`
+  ).bind(`fx_${currency.toLowerCase()}`, currency, rate, Date.now()).run();
+  return c.json({ success: true, data: { currency, rate_to_ngn: rate } });
 });
 app.notFound((c) => c.json({ success: false, error: "Not Found" }, 404));
 var worker_default = app;
@@ -3531,7 +4065,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env2, _ctx, middlewareCtx
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-p4doiX/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-Oa6LTS/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -3563,7 +4097,7 @@ function __facade_invoke__(request, env2, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-p4doiX/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-Oa6LTS/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;
