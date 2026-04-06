@@ -34,3 +34,22 @@ database_id = "847400fd-41b1-474e-b822-bd33cff433a9"
 binding = "PLATFORM_KV"
 id = "4dc91c49d36047f09f99084e0446b837"
 
+
+# ─── Staging Environment ──────────────────────────────────────────────────────
+[env.staging]
+name = "webwaka-central-mgmt-staging"
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+# Secrets (set via: wrangler secret put <KEY> --env staging)
+# JWT_SECRET
+# INTER_SERVICE_SECRET
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "webwaka-central-mgmt-db-staging"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[env.staging.kv_namespaces]]
+binding = "PLATFORM_KV"
+id = "00000000000000000000000000000000"
