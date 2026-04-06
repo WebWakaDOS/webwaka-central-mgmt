@@ -5,7 +5,7 @@
  * Phase 2 — Security & Fraud
  *
  * Automatically suspends or unsuspends tenants and logs every action to the
- * immutable `tenant_suspension_log` table.
+ * immutable `cmgt_tenant_suspension_log` table.
  *
  * Suspension updates the KV tenant config (`status: 'suspended'`) so that
  * all downstream services reading the config will respect the suspension.
@@ -57,7 +57,7 @@ export async function suspendTenant(
   const logId = `susp_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
   await db
     .prepare(
-      `INSERT INTO tenant_suspension_log
+      `INSERT INTO cmgt_tenant_suspension_log
          (id, tenant_id, action, reason, suspended_by, created_at)
        VALUES (?, ?, 'suspend', ?, ?, ?)`,
     )
@@ -90,7 +90,7 @@ export async function unsuspendTenant(
   const logId = `unsusp_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
   await db
     .prepare(
-      `INSERT INTO tenant_suspension_log
+      `INSERT INTO cmgt_tenant_suspension_log
          (id, tenant_id, action, reason, suspended_by, created_at)
        VALUES (?, ?, 'unsuspend', ?, ?, ?)`,
     )
@@ -135,7 +135,7 @@ export async function getTenantSuspensionLog(
   const { results } = await db
     .prepare(
       `SELECT id, action, reason, suspended_by, created_at
-       FROM tenant_suspension_log
+       FROM cmgt_tenant_suspension_log
        WHERE tenant_id = ?
        ORDER BY created_at DESC
        LIMIT ?`,

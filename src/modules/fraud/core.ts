@@ -57,7 +57,7 @@ async function ruleVelocity(
   const windowStart = Date.now() - VELOCITY_WINDOW_MS;
   const result = await db
     .prepare(
-      `SELECT COUNT(*) as cnt FROM central_mgmt_events
+      `SELECT COUNT(*) as cnt FROM cmgt_central_mgmt_events
        WHERE tenant_id = ? AND event_type = ? AND received_at >= ?`,
     )
     .bind(tenantId, eventType, windowStart)
@@ -78,7 +78,7 @@ async function ruleVelocity(
 
 /**
  * Score an inbound financial event and return the fraud evaluation result.
- * Persists the score to the `fraud_scores` table.
+ * Persists the score to the `cmgt_fraud_scores` table.
  */
 export async function scoreFraudEvent(
   db: D1Database,
@@ -148,11 +148,11 @@ export async function scoreFraudEvent(
     totalScore >= 70 ? 'block' :
     totalScore >= 40 ? 'flag' : 'allow';
 
-  // Persist to fraud_scores table
+  // Persist to cmgt_fraud_scores table
   const scoreId = `frd_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
   await db
     .prepare(
-      `INSERT INTO fraud_scores
+      `INSERT INTO cmgt_fraud_scores
          (id, event_id, event_type, tenant_id, score, risk_level, signals_json, action, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )

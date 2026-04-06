@@ -68,7 +68,7 @@ export async function enqueueDLQ(
 
   await db
     .prepare(
-      `INSERT INTO webhook_dlq
+      `INSERT INTO cmgt_webhook_dlq
          (id, event_id, event_type, tenant_id, target_url, payload_json,
           attempts, last_error, next_retry_at, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, 'pending', ?)`,
@@ -104,7 +104,7 @@ export async function retryDueDLQItems(db: D1Database): Promise<{
 
   const { results } = await db
     .prepare(
-      `SELECT * FROM webhook_dlq
+      `SELECT * FROM cmgt_webhook_dlq
        WHERE status IN ('pending', 'retrying') AND next_retry_at <= ?
        ORDER BY next_retry_at ASC
        LIMIT 50`,
@@ -130,7 +130,7 @@ export async function retryDueDLQItems(db: D1Database): Promise<{
       if (resp.ok) {
         await db
           .prepare(
-            `UPDATE webhook_dlq
+            `UPDATE cmgt_webhook_dlq
              SET status = 'delivered', delivered_at = ?, attempts = ?
              WHERE id = ?`,
           )
@@ -146,7 +146,7 @@ export async function retryDueDLQItems(db: D1Database): Promise<{
       if (newAttempts >= MAX_ATTEMPTS) {
         await db
           .prepare(
-            `UPDATE webhook_dlq
+            `UPDATE cmgt_webhook_dlq
              SET status = 'exhausted', attempts = ?, last_error = ?, next_retry_at = NULL
              WHERE id = ?`,
           )
@@ -157,7 +157,7 @@ export async function retryDueDLQItems(db: D1Database): Promise<{
         const nextRetry = now + retryDelayMs(newAttempts);
         await db
           .prepare(
-            `UPDATE webhook_dlq
+            `UPDATE cmgt_webhook_dlq
              SET status = 'retrying', attempts = ?, last_error = ?, next_retry_at = ?
              WHERE id = ?`,
           )
@@ -183,7 +183,7 @@ export async function listDLQEntries(
   if (status) {
     const { results } = await db
       .prepare(
-        `SELECT * FROM webhook_dlq WHERE status = ?
+        `SELECT * FROM cmgt_webhook_dlq WHERE status = ?
          ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       )
       .bind(status, limit, offset)
@@ -193,7 +193,7 @@ export async function listDLQEntries(
 
   const { results } = await db
     .prepare(
-      `SELECT * FROM webhook_dlq ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT * FROM cmgt_webhook_dlq ORDER BY created_at DESC LIMIT ? OFFSET ?`,
     )
     .bind(limit, offset)
     .all<DLQEntry>();

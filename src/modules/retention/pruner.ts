@@ -7,12 +7,12 @@
  * Deletes or archives records older than the configured retention window (90 days).
  *
  * Tables pruned:
- *   - central_mgmt_events  (processed events only — keeps unprocessed for audit)
- *   - fraud_scores         (all records older than cutoff)
- *   - webhook_dlq          (delivered or exhausted entries older than cutoff)
- *   - idempotency_keys     (expired keys — uses their own expires_at timestamp)
+ *   - cmgt_central_mgmt_events  (processed events only — keeps unprocessed for audit)
+ *   - cmgt_fraud_scores         (all records older than cutoff)
+ *   - cmgt_webhook_dlq          (delivered or exhausted entries older than cutoff)
+ *   - cmgt_idempotency_keys     (expired keys — uses their own expires_at timestamp)
  *
- * Ledger tables (ledger_entries, ai_usage_ledger) are NEVER deleted — they are
+ * Ledger tables (cmgt_ledger_entries, cmgt_ai_usage_ledger) are NEVER deleted — they are
  * the immutable financial record of the platform.
  */
 
@@ -42,7 +42,7 @@ export async function pruneOldData(db: D1Database): Promise<PrunerResult> {
     // Processed events older than 90 days
     db
       .prepare(
-        `DELETE FROM central_mgmt_events
+        `DELETE FROM cmgt_central_mgmt_events
          WHERE processed = 1 AND received_at < ?`,
       )
       .bind(cutoffMs)
@@ -50,14 +50,14 @@ export async function pruneOldData(db: D1Database): Promise<PrunerResult> {
 
     // Fraud scores older than 90 days
     db
-      .prepare(`DELETE FROM fraud_scores WHERE created_at < ?`)
+      .prepare(`DELETE FROM cmgt_fraud_scores WHERE created_at < ?`)
       .bind(cutoffMs)
       .run(),
 
     // Delivered or exhausted DLQ entries older than 90 days
     db
       .prepare(
-        `DELETE FROM webhook_dlq
+        `DELETE FROM cmgt_webhook_dlq
          WHERE status IN ('delivered', 'exhausted') AND created_at < ?`,
       )
       .bind(cutoffMs)
@@ -65,7 +65,7 @@ export async function pruneOldData(db: D1Database): Promise<PrunerResult> {
 
     // Expired idempotency keys (use their own expires_at timestamp)
     db
-      .prepare(`DELETE FROM idempotency_keys WHERE expires_at < ?`)
+      .prepare(`DELETE FROM cmgt_idempotency_keys WHERE expires_at < ?`)
       .bind(now)
       .run(),
   ]);

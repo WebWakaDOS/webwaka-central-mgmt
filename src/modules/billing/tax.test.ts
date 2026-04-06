@@ -138,7 +138,7 @@ describe('QA-CEN-3: convertToNGNKobo — multi-currency FX conversion', () => {
   });
 
   it('falls back to DEFAULT_FX_TO_NGN when D1 has no row', async () => {
-    const db = createMockD1(undefined); // no row in fx_rates
+    const db = createMockD1(undefined); // no row in cmgt_fx_rates
     const result = await convertToNGNKobo(1_000_000, 'GHS', db);
     // Should use DEFAULT_FX_TO_NGN.GHS = 90
     expect(result).toBe(90_000_000);

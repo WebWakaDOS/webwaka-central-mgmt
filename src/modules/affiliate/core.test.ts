@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AffiliateSystem, DEFAULT_COMMISSION_RATES } from './core';
 
 // ─── Mock affiliate data ───────────────────────────────────────────────────────
-// Mimics the affiliates DB table for the 5-node hierarchy used in tests.
+// Mimics the cmgt_affiliates DB table for the 5-node hierarchy used in tests.
 
 const MOCK_AFFILIATES: Record<string, {
   id: string; user_id: string; parent_id: string | null;
@@ -35,8 +35,8 @@ function createMockD1(commissions: unknown[] = []) {
     prepare: vi.fn((sql: string) => ({
       bind: vi.fn((...args: unknown[]) => ({
         first: vi.fn(async () => {
-          // Route SELECT on affiliates → return mock affiliate row by ID
-          if (sql.includes('FROM affiliates')) {
+          // Route SELECT on cmgt_affiliates → return mock affiliate row by ID
+          if (sql.includes('FROM cmgt_affiliates')) {
             const id = args[0] as string;
             return MOCK_AFFILIATES[id] ?? null;
           }

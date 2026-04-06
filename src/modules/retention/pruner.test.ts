@@ -78,7 +78,7 @@ describe('pruneOldData — data retention (90-day window)', () => {
     expect(result.prunedEvents).toBe(0);
   });
 
-  it('never touches ledger_entries or ai_usage_ledger (immutable financial records)', async () => {
+  it('never touches cmgt_ledger_entries or cmgt_ai_usage_ledger (immutable financial records)', async () => {
     const sqlCalls: string[] = [];
     const db = {
       prepare: vi.fn((sql: string) => {
@@ -95,9 +95,9 @@ describe('pruneOldData — data retention (90-day window)', () => {
     await pruneOldData(db);
 
     for (const sql of sqlCalls) {
-      expect(sql.toLowerCase()).not.toContain('ledger_entries');
-      expect(sql.toLowerCase()).not.toContain('ai_usage_ledger');
-      expect(sql.toLowerCase()).not.toContain('ai_quota_ledger');
+      expect(sql.toLowerCase()).not.toContain('cmgt_ledger_entries');
+      expect(sql.toLowerCase()).not.toContain('cmgt_ai_usage_ledger');
+      expect(sql.toLowerCase()).not.toContain('cmgt_ai_quota_ledger');
     }
   });
 });

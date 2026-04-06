@@ -9,7 +9,7 @@
  *   Level 1: 5.0%   Level 2: 3.0%   Level 3: 2.0%   Level 4: 1.0%   Level 5: 0.5%
  *
  * Monetary invariant: amounts are integer kobo only (Math.floor). Never floats in storage.
- * DB schema: affiliates + affiliate_commissions tables — see migration 003.
+ * DB schema: cmgt_affiliates + cmgt_affiliate_commissions tables — see migration 003.
  */
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -59,7 +59,7 @@ export class AffiliateSystem {
     const row = await this.db
       .prepare(
         `SELECT id, user_id, parent_id, level, commission_rate, status
-         FROM affiliates WHERE id = ? AND status = 'active'`,
+         FROM cmgt_affiliates WHERE id = ? AND status = 'active'`,
       )
       .bind(id)
       .first<{
@@ -103,7 +103,7 @@ export class AffiliateSystem {
 
     await this.db
       .prepare(
-        `INSERT INTO affiliates
+        `INSERT INTO cmgt_affiliates
            (id, user_id, parent_id, level, commission_rate, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
@@ -164,7 +164,7 @@ export class AffiliateSystem {
   }
 
   /**
-   * Persist a commission split batch to the `affiliate_commissions` table.
+   * Persist a commission split batch to the `cmgt_affiliate_commissions` table.
    * Call this after calculateSplits() once the underlying transaction is confirmed.
    *
    * @param transactionId  Source ledger transaction_id
@@ -185,7 +185,7 @@ export class AffiliateSystem {
       ids.push(id);
       return this.db
         .prepare(
-          `INSERT INTO affiliate_commissions
+          `INSERT INTO cmgt_affiliate_commissions
              (id, transaction_id, affiliate_id, user_id, level,
               amount_kobo, currency, status, created_at)
            VALUES (?, ?, ?, ?, ?, ?, 'NGN', 'pending', ?)`,
@@ -216,7 +216,7 @@ export class AffiliateSystem {
     createdAt: number;
   }>> {
     let sql = `SELECT id, transaction_id, level, amount_kobo, status, created_at
-               FROM affiliate_commissions WHERE affiliate_id = ?`;
+               FROM cmgt_affiliate_commissions WHERE affiliate_id = ?`;
     const params: (string | number)[] = [affiliateId];
 
     if (status) {

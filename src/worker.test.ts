@@ -117,11 +117,11 @@ describe('GET /api/ledger/integrity', () => {
 
 // ─── Affiliate endpoints (WCM-003) ────────────────────────────────────────────
 
-describe('POST /api/affiliates', () => {
+describe('POST /api/cmgt_affiliates', () => {
   it('returns 201 when registration succeeds', async () => {
     const env = makeEnv();
     const res = await invoke(
-      makeReq('POST', '/api/affiliates', { userId: 'user_x', level: 1 }),
+      makeReq('POST', '/api/cmgt_affiliates', { userId: 'user_x', level: 1 }),
       env,
     );
     expect(res.status).toBe(201);
@@ -132,7 +132,7 @@ describe('POST /api/affiliates', () => {
 
   it('returns 400 when required fields are missing', async () => {
     const env = makeEnv();
-    const res = await invoke(makeReq('POST', '/api/affiliates', { level: 1 }), env);
+    const res = await invoke(makeReq('POST', '/api/cmgt_affiliates', { level: 1 }), env);
     expect(res.status).toBe(400);
     const body = await res.json() as { success: boolean };
     expect(body.success).toBe(false);
@@ -141,19 +141,19 @@ describe('POST /api/affiliates', () => {
   it('returns 400 for an out-of-range level', async () => {
     const env = makeEnv();
     const res = await invoke(
-      makeReq('POST', '/api/affiliates', { userId: 'user_y', level: 9 }),
+      makeReq('POST', '/api/cmgt_affiliates', { userId: 'user_y', level: 9 }),
       env,
     );
     expect(res.status).toBe(400);
   });
 });
 
-describe('POST /api/affiliates/:id/calculate', () => {
+describe('POST /api/cmgt_affiliates/:id/calculate', () => {
   it('returns 200 with splits array', async () => {
     // The affiliate lookup (getAffiliate) returns null → empty splits is valid
     const env = makeEnv({ prepareReturn: mockStmt(null) });
     const res = await invoke(
-      makeReq('POST', '/api/affiliates/aff_1/calculate', { amountKobo: 100000 }),
+      makeReq('POST', '/api/cmgt_affiliates/aff_1/calculate', { amountKobo: 100000 }),
       env,
     );
     expect(res.status).toBe(200);
@@ -164,21 +164,21 @@ describe('POST /api/affiliates/:id/calculate', () => {
 
   it('returns 400 for non-integer amountKobo', async () => {
     const res = await invoke(
-      makeReq('POST', '/api/affiliates/aff_1/calculate', { amountKobo: 99.5 }),
+      makeReq('POST', '/api/cmgt_affiliates/aff_1/calculate', { amountKobo: 99.5 }),
     );
     expect(res.status).toBe(400);
   });
 
   it('returns 400 for missing amountKobo', async () => {
-    const res = await invoke(makeReq('POST', '/api/affiliates/aff_1/calculate', {}));
+    const res = await invoke(makeReq('POST', '/api/cmgt_affiliates/aff_1/calculate', {}));
     expect(res.status).toBe(400);
   });
 });
 
-describe('GET /api/affiliates/:id/commissions', () => {
+describe('GET /api/cmgt_affiliates/:id/commissions', () => {
   it('returns 200 with a results list', async () => {
     const env = makeEnv({ prepareReturn: mockStmt(null, []) });
-    const res = await invoke(makeReq('GET', '/api/affiliates/aff_1/commissions'), env);
+    const res = await invoke(makeReq('GET', '/api/cmgt_affiliates/aff_1/commissions'), env);
     expect(res.status).toBe(200);
     const body = await res.json() as { success: boolean; data: unknown[] };
     expect(body.success).toBe(true);

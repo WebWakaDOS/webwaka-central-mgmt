@@ -1,8 +1,8 @@
 -- Migration 001: Central Management Schema
 -- 
 -- Creates the core tables for the Central Management service:
---   - ledger_entries: Immutable double-entry ledger (Part 10.1 MGMT-4)
---   - central_mgmt_events: Inbound event log from transport and commerce
+--   - cmgt_ledger_entries: Immutable double-entry ledger (Part 10.1 MGMT-4)
+--   - cmgt_central_mgmt_events: Inbound event log from transport and commerce
 --
 -- Blueprint Reference: Part 10.1 (Central Management & Economics)
 -- Blueprint Reference: Part 9.2 (Monetary Integrity — integer kobo only)
@@ -11,7 +11,7 @@
 -- ─── Ledger Entries ───────────────────────────────────────────────────────────
 -- Immutable double-entry ledger. NEVER UPDATE or DELETE rows.
 -- All monetary values are stored as integer kobo (NGN × 100).
-CREATE TABLE IF NOT EXISTS ledger_entries (
+CREATE TABLE IF NOT EXISTS cmgt_ledger_entries (
   id              TEXT PRIMARY KEY,
   transaction_id  TEXT NOT NULL,
   account_id      TEXT NOT NULL,         -- e.g. 'platform_revenue', 'operator_abc123', 'vendor_xyz'
@@ -25,15 +25,15 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 );
 
 -- Indexes for efficient queries
-CREATE INDEX IF NOT EXISTS idx_ledger_account_id ON ledger_entries(account_id);
-CREATE INDEX IF NOT EXISTS idx_ledger_transaction_id ON ledger_entries(transaction_id);
-CREATE INDEX IF NOT EXISTS idx_ledger_account_type ON ledger_entries(account_type);
-CREATE INDEX IF NOT EXISTS idx_ledger_created_at ON ledger_entries(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ledger_account_id ON cmgt_ledger_entries(account_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_transaction_id ON cmgt_ledger_entries(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_account_type ON cmgt_ledger_entries(account_type);
+CREATE INDEX IF NOT EXISTS idx_ledger_created_at ON cmgt_ledger_entries(created_at DESC);
 
 -- ─── Central Mgmt Events ──────────────────────────────────────────────────────
 -- Inbound event log from transport and commerce services.
 -- Provides idempotency (source_event_id UNIQUE) and audit trail.
-CREATE TABLE IF NOT EXISTS central_mgmt_events (
+CREATE TABLE IF NOT EXISTS cmgt_central_mgmt_events (
   id                TEXT PRIMARY KEY,
   event_type        TEXT NOT NULL,       -- e.g. 'transport.booking.confirmed'
   source_event_id   TEXT NOT NULL UNIQUE, -- original aggregate_id for idempotency
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS central_mgmt_events (
   processed_at      INTEGER             -- Unix timestamp ms, NULL if not yet processed
 );
 
-CREATE INDEX IF NOT EXISTS idx_cme_event_type ON central_mgmt_events(event_type);
-CREATE INDEX IF NOT EXISTS idx_cme_tenant_id ON central_mgmt_events(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_cme_processed ON central_mgmt_events(processed);
-CREATE INDEX IF NOT EXISTS idx_cme_received_at ON central_mgmt_events(received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cme_event_type ON cmgt_central_mgmt_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_cme_tenant_id ON cmgt_central_mgmt_events(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_cme_processed ON cmgt_central_mgmt_events(processed);
+CREATE INDEX IF NOT EXISTS idx_cme_received_at ON cmgt_central_mgmt_events(received_at DESC);

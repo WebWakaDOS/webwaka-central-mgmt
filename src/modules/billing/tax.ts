@@ -8,7 +8,7 @@
  *   - VAT  (Value Added Tax):     7.5% of gross
  *   - WHT  (Withholding Tax):     5.0% of gross
  *   - Net payout to vendor:       gross − VAT − WHT (87.5%)
- *   - Multi-currency support:     NGN (base), GHS, KES via fx_rates table
+ *   - Multi-currency support:     NGN (base), GHS, KES via cmgt_fx_rates table
  */
 
 export const VAT_RATE = 0.075;   // 7.5%
@@ -17,7 +17,7 @@ export const WHT_RATE = 0.050;   // 5.0%
 export const SUPPORTED_CURRENCIES = ['NGN', 'GHS', 'KES'] as const;
 export type SupportedCurrency = (typeof SUPPORTED_CURRENCIES)[number];
 
-/** Approximate fallback rates — used if fx_rates table has no row for the currency. */
+/** Approximate fallback rates — used if cmgt_fx_rates table has no row for the currency. */
 export const DEFAULT_FX_TO_NGN: Record<SupportedCurrency, number> = {
   NGN: 1,
   GHS: 90,
@@ -56,7 +56,7 @@ export function calculateTaxes(
 
 /**
  * Convert an amount from a foreign currency to NGN kobo using live rates
- * stored in the `fx_rates` D1 table. Falls back to DEFAULT_FX_TO_NGN if no row.
+ * stored in the `cmgt_fx_rates` D1 table. Falls back to DEFAULT_FX_TO_NGN if no row.
  *
  * @param amountSmallestUnit  Amount in the smallest unit of `fromCurrency`.
  * @param fromCurrency        Source currency code.
@@ -70,7 +70,7 @@ export async function convertToNGNKobo(
   if (fromCurrency === 'NGN') return amountSmallestUnit;
 
   const row = await db
-    .prepare('SELECT rate_to_ngn FROM fx_rates WHERE currency = ?')
+    .prepare('SELECT rate_to_ngn FROM cmgt_fx_rates WHERE currency = ?')
     .bind(fromCurrency)
     .first<{ rate_to_ngn: number }>();
 

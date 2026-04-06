@@ -1,186 +1,61 @@
-name: CI/CD — WebWaka Central Management
+name: Deploy to Cloudflare
 
 on:
   push:
-    branches: [main, develop]
-  pull_request:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
-  # ============================================================================
-  # LINT & TEST
-  # ============================================================================
-  lint-and-test:
-    name: Lint & Test
+  migrate-staging:
+    name: Apply D1 Migrations (Staging)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+      - name: Install Wrangler
+        run: npm install -g wrangler
+      - name: Apply Migrations (Staging)
+        run: wrangler d1 migrations apply webwaka-staging-db --env staging --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: TypeScript type-check
-        run: npx tsc --noEmit || true
-
-      - name: Lint
-        run: npm run lint || true
-
-      - name: Run tests
-        run: npm test || true
-
-  # ============================================================================
-  # STAGING DEPLOYMENT (develop branch)
-  # ============================================================================
-  deploy-staging:
-    name: Deploy to Staging
+  migrate-production:
+    name: Apply D1 Migrations (Production)
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/develop'
-    needs: [lint-and-test]
-    environment:
-      name: staging
-      url: https://webwaka-central-mgmt-staging.webwaka.workers.dev
+    needs: migrate-staging
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build application
-        run: npm run build || true
+      - name: Install Wrangler
+        run: npm install -g wrangler
+      - name: Apply Migrations (Production)
+        run: wrangler d1 migrations apply webwaka-production-db --env production --remote
         env:
-          NODE_ENV: staging
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      - name: Apply D1 Migrations (Staging)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: d1 migrations apply webwaka-central-mgmt-db-staging --env staging --remote
-        continue-on-error: true  # D1 may need upgrade
-
-      - name: Deploy Workers to Staging
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env staging
-        env:
-          JWT_SECRET: ${{ secrets.JWT_SECRET_STAGING }}
-          INTER_SERVICE_SECRET: ${{ secrets.INTER_SERVICE_SECRET_STAGING }}
-
-      - name: Verify API health (Staging)
-        run: |
-          sleep 15
-          curl -sf https://webwaka-central-mgmt-staging.webwaka.workers.dev/health \
-            -o /tmp/health.json || echo "Health check pending..."
-          cat /tmp/health.json || true
-
-  # ============================================================================
-  # PRODUCTION DEPLOYMENT (main branch)
-  # ============================================================================
-  deploy-production:
-    name: Deploy to Production
+  deploy-worker:
+    name: Deploy Worker
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs: [lint-and-test]
-    environment:
-      name: production
-      url: https://webwaka-central-mgmt-production.webwaka.workers.dev
+    needs: migrate-production
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-
       - name: Install dependencies
-        run: npm ci
-
-      - name: Build application
-        run: npm run build || true
+        run: npm install
+      - name: Deploy to Cloudflare Workers (Staging)
+        run: npx wrangler deploy --env staging
         env:
-          NODE_ENV: production
-
-      - name: Apply D1 Migrations (Production)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: d1 migrations apply webwaka-central-mgmt-db-prod --env production --remote
-        continue-on-error: true  # D1 may need upgrade
-
-      - name: Deploy Workers to Production
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env production
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Deploy to Cloudflare Workers (Production)
+        run: npx wrangler deploy --env production
         env:
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          INTER_SERVICE_SECRET: ${{ secrets.INTER_SERVICE_SECRET }}
-
-      - name: Verify API health (Production)
-        run: |
-          sleep 20
-          curl -sf https://webwaka-central-mgmt-production.webwaka.workers.dev/health \
-            -o /tmp/health.json || echo "Health check pending..."
-          cat /tmp/health.json || true
-
-      - name: Verify Ledger KV connectivity
-        run: |
-          curl -sf https://webwaka-central-mgmt-production.webwaka.workers.dev/api/ledger/summary \
-            -H "Authorization: Bearer ${{ secrets.INTER_SERVICE_SECRET }}" \
-            -o /tmp/ledger.json || echo "Ledger check pending..."
-          cat /tmp/ledger.json || true
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: central-mgmt-v${{ github.run_number }}
-          name: "Central Management v${{ github.run_number }}"
-          body: |
-            ## WebWaka Central Management — Production Release
-
-            **Commit:** ${{ github.sha }}
-            **Branch:** main
-            **Deployed:** ${{ github.event.head_commit.timestamp }}
-
-            ### Endpoints:
-            - **Health:** https://webwaka-central-mgmt-production.webwaka.workers.dev/health
-            - **Ledger Summary:** https://webwaka-central-mgmt-production.webwaka.workers.dev/api/ledger/summary
-            - **Event Ingestion:** https://webwaka-central-mgmt-production.webwaka.workers.dev/api/events/ingest
-
-            ### Event Bus Integrations:
-            - ✅ `webwaka-transport` → `booking.created` / `booking.refunded` events
-            - ✅ `webwaka-commerce` → `payment.confirmed` / `refund.issued` events
-            - ✅ KV Ledger cache for real-time balance queries
-
-            ### Security:
-            - ✅ Inter-service authentication via `INTER_SERVICE_SECRET`
-            - ✅ JWT auth for admin dashboard routes
-            - ✅ All ledger entries immutable (append-only)
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

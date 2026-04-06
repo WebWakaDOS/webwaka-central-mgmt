@@ -10,7 +10,7 @@
  *     entire ledger can be verified offline without touching source code.
  *
  * Monetary invariant: all amounts in integer kobo (NGN × 100). Never floats.
- * Immutability invariant: ledger_entries rows are NEVER updated or deleted.
+ * Immutability invariant: cmgt_ledger_entries rows are NEVER updated or deleted.
  */
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ function canonicalEntry(
  */
 async function getLatestEntryHash(db: D1Database): Promise<string> {
   const row = await db
-    .prepare('SELECT entry_hash FROM ledger_entries ORDER BY created_at DESC, id DESC LIMIT 1')
+    .prepare('SELECT entry_hash FROM cmgt_ledger_entries ORDER BY created_at DESC, id DESC LIMIT 1')
     .first<{ entry_hash: string }>();
   return row?.entry_hash ?? 'GENESIS';
 }
@@ -130,7 +130,7 @@ export class LedgerService {
     await this.db.batch([
       this.db
         .prepare(
-          `INSERT OR IGNORE INTO ledger_entries
+          `INSERT OR IGNORE INTO cmgt_ledger_entries
              (id, transaction_id, account_id, account_type, type,
               amount_kobo, currency, status, metadata_json,
               previous_hash, entry_hash, created_at)
@@ -143,7 +143,7 @@ export class LedgerService {
         ),
       this.db
         .prepare(
-          `INSERT OR IGNORE INTO ledger_entries
+          `INSERT OR IGNORE INTO cmgt_ledger_entries
              (id, transaction_id, account_id, account_type, type,
               amount_kobo, currency, status, metadata_json,
               previous_hash, entry_hash, created_at)
@@ -241,7 +241,7 @@ export class LedgerService {
       .prepare(
         `SELECT id, transaction_id, account_id, type, amount_kobo, currency,
                 created_at, previous_hash, entry_hash
-         FROM ledger_entries ORDER BY created_at ASC, id ASC`,
+         FROM cmgt_ledger_entries ORDER BY created_at ASC, id ASC`,
       )
       .all<{
         id: string;

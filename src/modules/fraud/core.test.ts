@@ -9,8 +9,8 @@ import { scoreFraudEvent } from './core';
 // ─── Mock D1 factory ──────────────────────────────────────────────────────────
 //
 // We need to support two queries inside scoreFraudEvent:
-//   1. Velocity check: SELECT COUNT(*) FROM central_mgmt_events …  → .first()
-//   2. Insert into fraud_scores …                                   → .run()
+//   1. Velocity check: SELECT COUNT(*) FROM cmgt_central_mgmt_events …  → .first()
+//   2. Insert into cmgt_fraud_scores …                                   → .run()
 
 function createMockD1(velocityCount = 0) {
   const runMock = vi.fn(async () => ({ meta: { changes: 1 } }));

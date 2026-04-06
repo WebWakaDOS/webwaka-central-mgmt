@@ -62,7 +62,7 @@ async function checkIdempotency(
   aggregateId: string,
 ): Promise<boolean> {
   const row = await db
-    .prepare('SELECT event_id FROM idempotency_keys WHERE event_id = ? AND expires_at > ?')
+    .prepare('SELECT event_id FROM cmgt_idempotency_keys WHERE event_id = ? AND expires_at > ?')
     .bind(aggregateId, Date.now())
     .first<{ event_id: string }>();
   return row !== null;
@@ -81,7 +81,7 @@ async function registerIdempotencyKey(
   const expiresAt = now + IDEMPOTENCY_WINDOW_MS;
   await db
     .prepare(
-      `INSERT OR IGNORE INTO idempotency_keys
+      `INSERT OR IGNORE INTO cmgt_idempotency_keys
          (event_id, event_type, tenant_id, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?)`,
     )
@@ -121,7 +121,7 @@ app.get('/health', (c) =>
  * Phase 1 — Financial Integrity:
  *   • Idempotency keys (24 h window) — rejects duplicate aggregate_ids
  *   • Automated tax splitting for commerce.payout.processed (VAT 7.5%, WHT 5%)
- *   • Multi-currency support (NGN, GHS, KES via fx_rates table)
+ *   • Multi-currency support (NGN, GHS, KES via cmgt_fx_rates table)
  *
  * Phase 2 — Security & Fraud:
  *   • Fraud scoring on all financial events; BLOCK action returns 422
@@ -226,12 +226,12 @@ app.post('/events/ingest', async (c) => {
       );
     }
 
-    // For 'flag' level, we continue processing but note it in the response (logged to fraud_scores already)
+    // For 'flag' level, we continue processing but note it in the response (logged to cmgt_fraud_scores already)
   }
 
   // ── Check legacy idempotency (source_event_id UNIQUE) ──────────────────────
   const existingEvent = await c.env.DB.prepare(
-    `SELECT id FROM central_mgmt_events WHERE source_event_id = ?`,
+    `SELECT id FROM cmgt_central_mgmt_events WHERE source_event_id = ?`,
   ).bind(aggregate_id).first<{ id: string }>();
 
   if (existingEvent) {
@@ -240,7 +240,7 @@ app.post('/events/ingest', async (c) => {
 
   // ── Record the inbound event ────────────────────────────────────────────────
   await c.env.DB.prepare(
-    `INSERT INTO central_mgmt_events
+    `INSERT INTO cmgt_central_mgmt_events
        (id, event_type, source_event_id, tenant_id, payload_json, processed, received_at)
      VALUES (?, ?, ?, ?, ?, 0, ?)`,
   ).bind(eventId, event_type, aggregate_id, tenant_id ?? null, JSON.stringify(payload), now).run();
@@ -259,7 +259,7 @@ app.post('/events/ingest', async (c) => {
 
         await c.env.DB.batch([
           c.env.DB.prepare(
-            `INSERT OR IGNORE INTO ledger_entries
+            `INSERT OR IGNORE INTO cmgt_ledger_entries
                (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
              VALUES (?, ?, 'platform_revenue', 'platform', 'credit', ?, 'NGN', 'cleared', ?, ?)`,
           ).bind(
@@ -268,7 +268,7 @@ app.post('/events/ingest', async (c) => {
             now,
           ),
           c.env.DB.prepare(
-            `INSERT OR IGNORE INTO ledger_entries
+            `INSERT OR IGNORE INTO cmgt_ledger_entries
                (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
              VALUES (?, ?, ?, 'operator', 'credit', ?, 'NGN', 'cleared', ?, ?)`,
           ).bind(
@@ -285,7 +285,7 @@ app.post('/events/ingest', async (c) => {
       if (Number.isInteger(amountKobo) && amountKobo > 0) {
         const amountNGN = await convertToNGNKobo(amountKobo, currency, c.env.DB);
         await c.env.DB.prepare(
-          `INSERT OR IGNORE INTO ledger_entries
+          `INSERT OR IGNORE INTO cmgt_ledger_entries
              (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
            VALUES (?, ?, 'platform_revenue', 'platform', 'debit', ?, 'NGN', 'cleared', ?, ?)`,
         ).bind(
@@ -305,7 +305,7 @@ app.post('/events/ingest', async (c) => {
         const amountNGN      = await convertToNGNKobo(amountKobo, currency, c.env.DB);
         const commissionKobo = Math.round(amountNGN * commissionBps / 10_000);
         await c.env.DB.prepare(
-          `INSERT OR IGNORE INTO ledger_entries
+          `INSERT OR IGNORE INTO cmgt_ledger_entries
              (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
            VALUES (?, ?, 'platform_commission', 'platform', 'credit', ?, 'NGN', 'cleared', ?, ?)`,
         ).bind(
@@ -344,7 +344,7 @@ app.post('/events/ingest', async (c) => {
         await c.env.DB.batch([
           // Net payout to vendor (gross − VAT − WHT)
           c.env.DB.prepare(
-            `INSERT OR IGNORE INTO ledger_entries
+            `INSERT OR IGNORE INTO cmgt_ledger_entries
                (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
              VALUES (?, ?, ?, 'vendor', 'debit', ?, 'NGN', 'cleared', ?, ?)`,
           ).bind(
@@ -354,7 +354,7 @@ app.post('/events/ingest', async (c) => {
 
           // VAT → platform tax collection account
           c.env.DB.prepare(
-            `INSERT OR IGNORE INTO ledger_entries
+            `INSERT OR IGNORE INTO cmgt_ledger_entries
                (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
              VALUES (?, ?, 'platform_vat', 'platform', 'credit', ?, 'NGN', 'cleared', ?, ?)`,
           ).bind(
@@ -364,7 +364,7 @@ app.post('/events/ingest', async (c) => {
 
           // WHT → platform withholding tax account
           c.env.DB.prepare(
-            `INSERT OR IGNORE INTO ledger_entries
+            `INSERT OR IGNORE INTO cmgt_ledger_entries
                (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
              VALUES (?, ?, 'platform_wht', 'platform', 'credit', ?, 'NGN', 'cleared', ?, ?)`,
           ).bind(
@@ -396,7 +396,7 @@ app.post('/events/ingest', async (c) => {
 
     // ── Mark event as processed ─────────────────────────────────────────────
     await c.env.DB.prepare(
-      `UPDATE central_mgmt_events SET processed = 1, processed_at = ? WHERE id = ?`,
+      `UPDATE cmgt_central_mgmt_events SET processed = 1, processed_at = ? WHERE id = ?`,
     ).bind(now, eventId).run();
 
     // ── Phase 1: Register idempotency key (after successful processing) ─────
@@ -427,7 +427,7 @@ app.get('/api/ledger/entries', requireRole(['admin', 'super_admin']), async (c) 
   const eventType = c.req.query('event_type');
   const currency  = c.req.query('currency');
 
-  let query = `SELECT * FROM ledger_entries`;
+  let query = `SELECT * FROM cmgt_ledger_entries`;
   const params: (string | number)[] = [];
   const conditions: string[] = [];
 
@@ -455,7 +455,7 @@ app.get('/api/ledger/summary', requireRole(['admin', 'super_admin']), async (c) 
       SUM(CASE WHEN type = 'credit' THEN amount_kobo ELSE 0 END) as total_credits_kobo,
       SUM(CASE WHEN type = 'debit'  THEN amount_kobo ELSE 0 END) as total_debits_kobo,
       SUM(CASE WHEN type = 'credit' THEN amount_kobo ELSE -amount_kobo END) as balance_kobo
-    FROM ledger_entries
+    FROM cmgt_ledger_entries
     WHERE status = 'cleared'`;
 
   const params: string[] = [];
@@ -475,7 +475,7 @@ app.get('/api/events', requireRole(['admin', 'super_admin']), async (c) => {
   const offset = parseInt(c.req.query('offset') ?? '0');
   const events = await c.env.DB.prepare(
     `SELECT id, event_type, source_event_id, tenant_id, processed, received_at, processed_at
-     FROM central_mgmt_events
+     FROM cmgt_central_mgmt_events
      ORDER BY received_at DESC LIMIT ? OFFSET ?`,
   ).bind(limit, offset).all();
   return c.json({ success: true, data: events.results });
@@ -493,7 +493,7 @@ app.get('/api/fraud/scores', requireRole(['admin', 'super_admin']), async (c) =>
   const riskLevel = c.req.query('risk_level');
   const tenantId  = c.req.query('tenant_id');
 
-  let query = `SELECT * FROM fraud_scores`;
+  let query = `SELECT * FROM cmgt_fraud_scores`;
   const params: (string | number)[] = [];
   const conditions: string[] = [];
 
@@ -621,7 +621,7 @@ app.get('/api/admin/tenants/:tenantId/status', requireRole(['admin', 'super_admi
  */
 app.get('/api/admin/fx-rates', requireRole(['admin', 'super_admin']), async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT currency, rate_to_ngn, updated_at FROM fx_rates ORDER BY currency`,
+    `SELECT currency, rate_to_ngn, updated_at FROM cmgt_fx_rates ORDER BY currency`,
   ).all();
   return c.json({ success: true, data: results });
 });
@@ -643,7 +643,7 @@ app.put('/api/admin/fx-rates/:currency', requireRole(['super_admin']), async (c)
   }
 
   await c.env.DB.prepare(
-    `INSERT INTO fx_rates (id, currency, rate_to_ngn, updated_at)
+    `INSERT INTO cmgt_fx_rates (id, currency, rate_to_ngn, updated_at)
      VALUES (?, ?, ?, ?)
      ON CONFLICT(currency) DO UPDATE SET rate_to_ngn = excluded.rate_to_ngn, updated_at = excluded.updated_at`,
   ).bind(`fx_${currency.toLowerCase()}`, currency, rate, Date.now()).run();
@@ -675,11 +675,11 @@ app.get('/api/ledger/integrity', requireRole(['super_admin']), async (c) => {
 // ─── Affiliate Commission Engine API (WCM-003) ────────────────────────────────
 
 /**
- * POST /api/affiliates
+ * POST /api/cmgt_affiliates
  * Register a new affiliate node.
  * Body: { userId, parentId?, level, commissionRate? }
  */
-app.post('/api/affiliates', requireRole(['admin', 'super_admin']), async (c) => {
+app.post('/api/cmgt_affiliates', requireRole(['admin', 'super_admin']), async (c) => {
   let body: { userId: string; parentId?: string; level: number; commissionRate?: number };
   try {
     body = await c.req.json();
@@ -703,11 +703,11 @@ app.post('/api/affiliates', requireRole(['admin', 'super_admin']), async (c) => 
 });
 
 /**
- * POST /api/affiliates/:affiliateId/calculate
+ * POST /api/cmgt_affiliates/:affiliateId/calculate
  * Calculate commission splits for a transaction amount.
  * Body: { amountKobo: number }
  */
-app.post('/api/affiliates/:affiliateId/calculate', requireRole(['admin', 'super_admin']), async (c) => {
+app.post('/api/cmgt_affiliates/:affiliateId/calculate', requireRole(['admin', 'super_admin']), async (c) => {
   const { affiliateId } = c.req.param();
   let amountKobo: number;
 
@@ -725,11 +725,11 @@ app.post('/api/affiliates/:affiliateId/calculate', requireRole(['admin', 'super_
 });
 
 /**
- * GET /api/affiliates/:affiliateId/commissions
+ * GET /api/cmgt_affiliates/:affiliateId/commissions
  * List commission records for an affiliate.
  * Query params: ?status=pending|paid|cancelled&limit=50
  */
-app.get('/api/affiliates/:affiliateId/commissions', requireRole(['admin', 'super_admin']), async (c) => {
+app.get('/api/cmgt_affiliates/:affiliateId/commissions', requireRole(['admin', 'super_admin']), async (c) => {
   const { affiliateId } = c.req.param();
   const statusParam = c.req.query('status') as 'pending' | 'paid' | 'cancelled' | undefined;
   const limit       = Math.min(parseInt(c.req.query('limit') ?? '50'), 200);

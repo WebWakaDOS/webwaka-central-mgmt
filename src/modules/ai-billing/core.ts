@@ -6,12 +6,12 @@
  *
  * Processes `ai.usage.recorded` events emitted by webwaka-ai-platform.
  * For each event, this module:
- *   1. Records the AI usage in the `ai_usage_ledger` table
- *   2. Debits the tenant's AI quota (token balance) in `ai_quota_ledger`
+ *   1. Records the AI usage in the `cmgt_ai_usage_ledger` table
+ *   2. Debits the tenant's AI quota (token balance) in `cmgt_ai_quota_ledger`
  *   3. Emits a billing.debit.recorded event if the tenant is on a metered plan
  *
  * D1 Schema (run via migration):
- *   CREATE TABLE IF NOT EXISTS ai_usage_ledger (
+ *   CREATE TABLE IF NOT EXISTS cmgt_ai_usage_ledger (
  *     id TEXT PRIMARY KEY,
  *     tenant_id TEXT NOT NULL,
  *     capability_id TEXT NOT NULL,
@@ -24,7 +24,7 @@
  *     recorded_at INTEGER NOT NULL
  *   );
  *
- *   CREATE TABLE IF NOT EXISTS ai_quota_ledger (
+ *   CREATE TABLE IF NOT EXISTS cmgt_ai_quota_ledger (
  *     id TEXT PRIMARY KEY,
  *     tenant_id TEXT NOT NULL,
  *     tokens_allocated INTEGER NOT NULL DEFAULT 0,
@@ -70,9 +70,9 @@ export async function processAIUsageEvent(
 ): Promise<{ recorded: boolean; quotaExceeded: boolean }> {
   const now = Date.now();
 
-  // ─── 1. Record usage in ai_usage_ledger (idempotent via INSERT OR IGNORE) ──
+  // ─── 1. Record usage in cmgt_ai_usage_ledger (idempotent via INSERT OR IGNORE) ──
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO ai_usage_ledger
+    `INSERT OR IGNORE INTO cmgt_ai_usage_ledger
        (id, tenant_id, capability_id, model, prompt_tokens, completion_tokens,
         total_tokens, used_byok, estimated_cost_usd, recorded_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -89,12 +89,12 @@ export async function processAIUsageEvent(
     now,
   ).run();
 
-  // ─── 2. Update ai_quota_ledger ────────────────────────────────────────────
+  // ─── 2. Update cmgt_ai_quota_ledger ────────────────────────────────────────────
   // Upsert: if no quota record exists, create one with a default allocation
   const DEFAULT_MONTHLY_TOKENS = 1_000_000; // 1M tokens/month default
 
   const existing = await env.DB.prepare(
-    `SELECT id, tokens_allocated, tokens_consumed FROM ai_quota_ledger WHERE tenant_id = ?`
+    `SELECT id, tokens_allocated, tokens_consumed FROM cmgt_ai_quota_ledger WHERE tenant_id = ?`
   ).bind(tenantId).first<{ id: string; tokens_allocated: number; tokens_consumed: number }>();
 
   let quotaExceeded = false;
@@ -102,7 +102,7 @@ export async function processAIUsageEvent(
   if (!existing) {
     // Create initial quota record
     await env.DB.prepare(
-      `INSERT INTO ai_quota_ledger
+      `INSERT INTO cmgt_ai_quota_ledger
          (id, tenant_id, tokens_allocated, tokens_consumed, updated_at)
        VALUES (?, ?, ?, ?, ?)`
     ).bind(
@@ -117,7 +117,7 @@ export async function processAIUsageEvent(
     quotaExceeded = newConsumed > existing.tokens_allocated;
 
     await env.DB.prepare(
-      `UPDATE ai_quota_ledger SET tokens_consumed = ?, updated_at = ? WHERE tenant_id = ?`
+      `UPDATE cmgt_ai_quota_ledger SET tokens_consumed = ?, updated_at = ? WHERE tenant_id = ?`
     ).bind(newConsumed, now, tenantId).run();
 
     // ─── 3. Emit billing.debit.recorded for metered tenants ─────────────────
@@ -126,9 +126,9 @@ export async function processAIUsageEvent(
     if (!payload.usedByok && payload.estimatedCostUsd && payload.estimatedCostUsd > 0) {
       const costKobo = Math.round(payload.estimatedCostUsd * 1650 * 100); // USD → NGN → kobo
       if (costKobo > 0) {
-        // Write to ledger_entries for financial record-keeping
+        // Write to cmgt_ledger_entries for financial record-keeping
         await env.DB.prepare(
-          `INSERT OR IGNORE INTO ledger_entries
+          `INSERT OR IGNORE INTO cmgt_ledger_entries
              (id, transaction_id, account_id, account_type, type, amount_kobo, currency, status, metadata_json, created_at)
            VALUES (?, ?, ?, 'tenant', 'debit', ?, 'NGN', 'cleared', ?, ?)`
         ).bind(
@@ -229,7 +229,7 @@ export async function getAIUsageSummary(
        SUM(total_tokens) as total_tokens,
        COUNT(*) as total_requests,
        SUM(COALESCE(estimated_cost_usd, 0)) as estimated_cost_usd
-     FROM ai_usage_ledger
+     FROM cmgt_ai_usage_ledger
      WHERE tenant_id = ? AND recorded_at >= ?`
   ).bind(tenantId, since).first<{
     total_tokens: number;
@@ -242,7 +242,7 @@ export async function getAIUsageSummary(
        capability_id as capabilityId,
        SUM(total_tokens) as totalTokens,
        COUNT(*) as requests
-     FROM ai_usage_ledger
+     FROM cmgt_ai_usage_ledger
      WHERE tenant_id = ? AND recorded_at >= ?
      GROUP BY capability_id
      ORDER BY totalTokens DESC`
