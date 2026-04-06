@@ -13,12 +13,19 @@
  *   Phase 1 — Financial Integrity: idempotency keys, automated tax splitting (VAT+WHT), multi-currency
  *   Phase 2 — Security & Fraud: real-time fraud scoring, tenant suspension hook
  *   Phase 3 — Reliability: webhook DLQ, data retention pruner
+ * Updated: 2026-04-06 — Taskbook WCM-001/003/009/010:
+ *   WCM-001: Ledger hash-chain integrity verification endpoint
+ *   WCM-003: Affiliate commission engine API (register, calculate, list)
+ *   WCM-009: Compound indexes in migration 003
+ *   WCM-010: Expanded QA suite
  */
 import { Hono }                                          from 'hono';
 import { jwtAuthMiddleware, requireRole }                from '@webwaka/core';
-import { processAIUsageEvent }                           from './modules/ai-billing/core';
+import { processAIUsageEvent, getAIUsageSummary }        from './modules/ai-billing/core';
 import { calculateTaxes, convertToNGNKobo, isSupportedCurrency } from './modules/billing/tax';
 import { scoreFraudEvent }                               from './modules/fraud/core';
+import { LedgerService }                                 from './modules/ledger/core';
+import { AffiliateSystem }                               from './modules/affiliate/core';
 import { enqueueDLQ, retryDueDLQItems, listDLQEntries } from './modules/webhooks/dlq';
 import { pruneOldData }                                  from './modules/retention/pruner';
 import {
@@ -642,6 +649,110 @@ app.put('/api/admin/fx-rates/:currency', requireRole(['super_admin']), async (c)
   ).bind(`fx_${currency.toLowerCase()}`, currency, rate, Date.now()).run();
 
   return c.json({ success: true, data: { currency, rate_to_ngn: rate } });
+});
+
+// ─── Ledger Chain Integrity (WCM-001) ─────────────────────────────────────────
+
+/**
+ * GET /api/ledger/integrity
+ * Verifies the cryptographic hash chain of the entire ledger.
+ * Returns the number of verified entries and whether the chain is intact.
+ * Super-admin only — this is a potentially expensive full-table scan.
+ */
+app.get('/api/ledger/integrity', requireRole(['super_admin']), async (c) => {
+  const service = new LedgerService(c.env.DB);
+  const result  = await service.verifyChainIntegrity();
+  return c.json({
+    success: true,
+    data: {
+      valid:          result.valid,
+      checkedEntries: result.checkedEntries,
+      ...(result.firstInvalidId ? { firstInvalidId: result.firstInvalidId } : {}),
+    },
+  });
+});
+
+// ─── Affiliate Commission Engine API (WCM-003) ────────────────────────────────
+
+/**
+ * POST /api/affiliates
+ * Register a new affiliate node.
+ * Body: { userId, parentId?, level, commissionRate? }
+ */
+app.post('/api/affiliates', requireRole(['admin', 'super_admin']), async (c) => {
+  let body: { userId: string; parentId?: string; level: number; commissionRate?: number };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const { userId, parentId, level, commissionRate } = body;
+  if (!userId || !Number.isInteger(level)) {
+    return c.json({ success: false, error: 'userId and integer level are required' }, 400);
+  }
+
+  try {
+    const system = new AffiliateSystem(c.env.DB);
+    const node   = await system.registerAffiliate(userId, parentId ?? null, level, commissionRate);
+    return c.json({ success: true, data: node }, 201);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Registration failed';
+    return c.json({ success: false, error: msg }, 400);
+  }
+});
+
+/**
+ * POST /api/affiliates/:affiliateId/calculate
+ * Calculate commission splits for a transaction amount.
+ * Body: { amountKobo: number }
+ */
+app.post('/api/affiliates/:affiliateId/calculate', requireRole(['admin', 'super_admin']), async (c) => {
+  const { affiliateId } = c.req.param();
+  let amountKobo: number;
+
+  try {
+    const body = await c.req.json<{ amountKobo: number }>();
+    amountKobo = Number(body.amountKobo);
+    if (!Number.isInteger(amountKobo) || amountKobo <= 0) throw new Error();
+  } catch {
+    return c.json({ success: false, error: 'Body must be { amountKobo: <positive integer> }' }, 400);
+  }
+
+  const system = new AffiliateSystem(c.env.DB);
+  const splits = await system.calculateSplits(amountKobo, affiliateId);
+  return c.json({ success: true, data: { affiliateId, amountKobo, splits } });
+});
+
+/**
+ * GET /api/affiliates/:affiliateId/commissions
+ * List commission records for an affiliate.
+ * Query params: ?status=pending|paid|cancelled&limit=50
+ */
+app.get('/api/affiliates/:affiliateId/commissions', requireRole(['admin', 'super_admin']), async (c) => {
+  const { affiliateId } = c.req.param();
+  const statusParam = c.req.query('status') as 'pending' | 'paid' | 'cancelled' | undefined;
+  const limit       = Math.min(parseInt(c.req.query('limit') ?? '50'), 200);
+
+  const system = new AffiliateSystem(c.env.DB);
+  const list   = await system.getAffiliateCommissions(affiliateId, statusParam, limit);
+  return c.json({ success: true, data: list });
+});
+
+// ─── AI Usage Summary API ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/ai/usage/:tenantId
+ * Returns AI usage summary for a tenant (last 30 days by default).
+ * Query params: ?since=<epoch_ms>
+ */
+app.get('/api/ai/usage/:tenantId', requireRole(['admin', 'super_admin']), async (c) => {
+  const { tenantId } = c.req.param();
+  const sinceParam   = c.req.query('since');
+  const sinceMs      = sinceParam ? parseInt(sinceParam) : undefined;
+
+  const summary = await getAIUsageSummary({ DB: c.env.DB, PLATFORM_KV: c.env.PLATFORM_KV }, tenantId, sinceMs);
+  return c.json({ success: true, data: summary });
 });
 
 // ─── 404 ──────────────────────────────────────────────────────────────────────
