@@ -44,6 +44,8 @@ function makeEnv(overrides: Partial<{
       delete: vi.fn(async () => undefined),
       list:   vi.fn(async () => ({ keys: [] })),
     } as unknown as KVNamespace,
+    JWT_SECRET: 'test-jwt-secret',
+    INTER_SERVICE_SECRET: 'test-inter-service-secret',
   };
 }
 
