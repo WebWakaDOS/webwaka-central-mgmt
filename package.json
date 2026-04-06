@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@webwaka/core": "^1.6.1",
+    "dexie": "^4.4.2",
     "hono": "^4.12.9"
   },
   "devDependencies": {
@@ -21,6 +22,12 @@
     "vitest": "^1.6.1",
     "wrangler": "^3.114.0"
   },
-  "keywords": ["webwaka", "cloudflare-workers", "ledger", "affiliate", "central-management"],
+  "keywords": [
+    "webwaka",
+    "cloudflare-workers",
+    "ledger",
+    "affiliate",
+    "central-management"
+  ],
   "license": "UNLICENSED"
 }
